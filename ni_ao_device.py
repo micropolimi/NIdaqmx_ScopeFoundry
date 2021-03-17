@@ -1,134 +1,192 @@
 import nidaqmx
-import warnings
-import math
 import numpy as np
-import scipy.signal as sp
 
 from nidaqmx import stream_writers
 
 class NI_AO_device(object):
     
-    def __init__(self, channel, mode, sample_mode, num_periods, rate, amplitude, waveform, frequency, offset, debug=False, dummy=False):
+    def __init__(self, channel, debug = False, dummy = False, verbose = True):
         
-        self.dict={"continuous": nidaqmx.constants.AcquisitionType.CONTINUOUS,
-                   "finite": nidaqmx.constants.AcquisitionType.FINITE}
         self.dummy = dummy
-        self.debug = debug ,
+        self.debug = debug
+        self.verbose = verbose
+
         self.channel = channel
-        self.mode = mode
+        self.sample_modes = {"continuous": nidaqmx.constants.AcquisitionType.CONTINUOUS,
+                             "finite": nidaqmx.constants.AcquisitionType.FINITE,
+                             "hw_timed": nidaqmx.constants.AcquisitionType.HW_TIMED_SINGLE_POINT
+                             }
+        self.trigger = False
+        self.trigger_edge_modes = {"rising": nidaqmx.constants.Edge.RISING,
+                                   "falling": nidaqmx.constants.Edge.FALLING
+                                   }
         
-        self.sample_mode=sample_mode
-        self.num_periods=num_periods
-        self.rate=rate
-        
-        self.amplitude = amplitude
-        self.waveform = waveform
-        self.frequency = frequency
-        self.offset = offset
-        
-        if not self.dummy:            
-            self.Task()
-    
-    def Task(self):
+        self.create_task()
+
+    def create_task(self):
+        '''creates a task and add an analog output channel'''            
         if hasattr(self, 'task'):
             self.close()
             
         self.task = nidaqmx.Task()
-        self.task.ao_channels.add_ao_voltage_chan(physical_channel=self.channel, min_val=-10.0, max_val=10.0) #add an analog output channel
-        if self.mode =="ao_voltage":
-            self.set_ampl(self.amplitude)        
-        elif self.mode == "ao_waveform":
-            self.num_samples=self.num_periods*int(self.rate/self.frequency)
-            try:
-                self.task.timing.cfg_samp_clk_timing(rate= self.rate, sample_mode=self.dict.get(self.sample_mode), samps_per_chan=self.num_samples)
-                writer= stream_writers.AnalogSingleChannelWriter(self.task.out_stream, auto_start=False)
-                array=np.linspace(start=0, stop=2*np.pi*self.num_periods, num=self.num_samples, endpoint=False)
-                if self.waveform == "sine":
-                    samples=self.amplitude*np.sin(array)+self.offset
-                elif self.waveform == "triangle":
-                    samples=self.amplitude*sp.sawtooth(array, width=0.5)+self.offset
-                elif self.waveform == "square":
-                    samples=self.amplitude*sp.square(array)+self.offset
-                writer.write_many_sample(samples)
-            except Exception as e: 
-                print(e)
-                print ("ERROR: Use a rate of at least twice the frequency of the waveform!")
+        self.task.ao_channels.add_ao_voltage_chan(physical_channel=self.channel,
+                                                  min_val=-10.0, max_val=10.0) 
+    
+    def set_trigger(self, trigger = False, trigger_source = "/Dev1/PFI0", trigger_edge_key = 'rising'):
+        
+        self.trigger = trigger
+        
+        if not hasattr(self, 'task'):
+            raise(AttributeError('AO task not active, unable to set trigger'))  
+        self.stop_task()
+        if trigger:
+            self.task.triggers.start_trigger.trig_type = nidaqmx.constants.TriggerType.DIGITAL_EDGE
+            self.task.triggers.start_trigger.cfg_dig_edge_start_trig(trigger_source = trigger_source,
+                                                                     trigger_edge = self.trigger_edge_modes[trigger_edge_key])
+        else:
+            self.task.triggers.start_trigger.disable_start_trig()  
             
+        if self.verbose: print(f'trigger set to {trigger} on {trigger_source}')
+     
+    def reset_task_on_mode_change(self, mode):
+        self.close()
+        self.create_task()
+        if self.verbose: print(f'AO task recreated, now operating in {mode} mode')
+        
+    def reset_task_on_channel_change(self, channel):
+        self.close()
+        self.channel = channel
+        self.create_task()
+        if self.verbose: print(f'AO task recreated, now operating in channel {channel}')
+        
+    def write_constant_voltage(self, voltage): 
+        self.stop_task()
+        self.task.write(voltage, auto_start = True)
+        if self.verbose: print(f'voltage set to {voltage}' )
+       
+    def write_waveform( self, sample_mode_key = 'continuous',
+                        waveform_type = 'sine',
+                        num_periods = 6, 
+                        amplitude = 1,        
+                        frequency = 50,
+                        spike_amplitude = 0, spike_duration = 0, 
+                        samples_per_period = 100,
+                        offset = 0 ):
+        
+        if not hasattr(self, 'task'):
+            raise(AttributeError('AO task not active, unable to write signal'))  
+  
+        rate= frequency * samples_per_period 
+        if rate >= 250000:
+            raise(ValueError('Frequency too high, unable to set NIDAQ analog output'))
+        
+        sample_mode = self.sample_modes[sample_mode_key]
+            
+        samples = self.generate_signal(waveform_type,
+                                        amplitude, frequency, rate, num_periods,
+                                        spike_amplitude, spike_duration, 
+                                        offset)
+        self.samples = samples
+        num_samples = len(samples) # self.num_periods * int(self.rate/self.frequency)
+        try:
+            self.stop_task()
+            self.task.timing.cfg_samp_clk_timing(rate = rate, 
+                                                 sample_mode = sample_mode, 
+                                                 samps_per_chan = num_samples)
+            writer = stream_writers.AnalogSingleChannelWriter(self.task.out_stream, auto_start = False)
+            written_num = writer.write_many_sample(samples)
+            if self.verbose: print(f'successfully written {written_num} samples' )
+            
+        except Exception as err: 
+            print (err)
+        
+    def generate_signal(self, waveform_type,
+                        amplitude, frequency, rate, num_periods,
+                        spike_amplitude, spike_duration, 
+                        offset):
+        
+        T = 1/frequency # Hz 
+        rate = rate
+        dt = 1/rate
+        
+        Ncycles = num_periods
+        epsilon = 1e-9 # 1ns delay to avoid approximation error in rect and step function
+        t = np.arange(0, Ncycles*T, dt) + epsilon
+
+        if waveform_type == "sine":
+            samples = amplitude * np.sin(2*np.pi*t/T)
+        
+        elif waveform_type == "rect": 
+            width = 0.5
+            samples =  amplitude * ( (t) % T < (width*T) ).astype('float')
+        
+        elif waveform_type == "step": 
+            Nsteps = 3 # number of steps is set to 3 here
+            deltaAmp = amplitude # the voltage increase in each step is deltaAmp
+            samples =  deltaAmp * ( (t//T) % Nsteps ).astype('float')
+        else:
+            raise(ValueError('Waveform not specified'))
+            
+        if spike_amplitude > 0:
+            # spikeT = 0.0005 #s
+            # spikeT = 0.05/freq # percentage of the step duration
+            samples += spike_amplitude * ( (t%T) < spike_duration)
+        
+        samples += offset
+        return samples
+              
     def start_task(self):
+        
+        if not hasattr(self, 'task'):
+            raise(AttributeError('Task not active, unable to start'))
+        
         if self.task.is_task_done()==True:
             self.task.start()
         
     def stop_task(self):
-        #suppress warning that might occurr when task i stopped during acquisition
-        #warnings.filterwarnings('ignore', category=nidaqmx.DaqWarning)
+        if not hasattr(self, 'task'):
+            raise(AttributeError('Task not active, unable to stop'))
+        # suppress warning that might occurr when task i stopped during acquisition
+        # warnings.filterwarnings('ignore', category=nidaqmx.DaqWarning)
         self.task.stop() #stop the task(different from the closing of the task, I suppose)
-        #warnings.filterwarnings('default',category=nidaqmx.DaqWarning)
-        
+        # warnings.filterwarnings('default',category=nidaqmx.DaqWarning)      
             
     def close(self):
+        if not hasattr(self, 'task'):
+            raise(AttributeError('Task not active, unable to close'))
+        self.task.close()
+        delattr(self, 'task')
         
-        self.task.close() #close the task
-        
-    def write(self, data):
-        
-        self.task.write(data, auto_start = True)
-        
-        
-    def set_mode(self, mode):
-        
-        self.mode = mode
-        self.Task()
 
-    def set_ampl(self, amplitude):
-         
-        self.amplitude = amplitude
-        if self.mode == "ao_voltage":
-            self.stop_task()
-            self.write(amplitude)
-        elif self.mode == "ao_waveform":
-            self.stop_task()
-            self.Task()
-            
-    def set_waveform(self, waveform):
-         
-        self.waveform = waveform
-        if self.mode == "ao_waveform":
-            self.stop_task()
-            self.Task()
-            
-    def set_frequency(self, frequency):
-         
-        self.frequency = frequency
-        if self.mode == "ao_waveform":
-            self.stop_task()
-            self.Task()
-            
-    def set_offset(self, offset):
-         
-        self.offset = offset
-        if self.mode == "ao_waveform":
-            self.stop_task()
-            self.Task()
-            
-            
-    def set_rate(self, rate):
-        self.rate = rate
-        if self.mode == "ao_waveform":
-            self.stop_task()
-            self.Task()
-                
-    def set_sample_mode(self,sample_mode):
-        self.sample_mode=sample_mode
-        if self.mode == "ao_waveform":
-            self.stop_task()
-            self.Task()
-         
-    def set_num_periods(self, num_periods):
-        self.num_periods=num_periods
-        if self.mode == "ao_waveform":
-            self.stop_task()
-            self.Task()
-            
+if __name__ == '__main__':
+    
+    import time  
+    from matplotlib import pyplot as plt
+       
+    dev = NI_AO_device('Dev1/ao0')
+    
+    try:
+        dev.create_task()
+        dev.set_trigger(False, '/Dev1/PFI0','rising')
         
+        dev.write_waveform( 
+                         sample_mode_key = 'finite',
+                         waveform_type = 'sine',
+                         num_periods = 3, 
+                         amplitude = 1.,        
+                         frequency = 100,
+                         spike_amplitude = 0., spike_duration = 0., 
+                         samples_per_period = 100,
+                         offset = 0.)
         
+        if hasattr(dev, 'samples'):
+            dev.start_task()
+            time.sleep(1.1)
+            plt.figure() 
+            plt.plot(dev.samples)
+            
+        dev.stop_task()
+    finally:
+        dev.close()
+       
         
