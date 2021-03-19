@@ -52,13 +52,15 @@ class NI_AO_hw(HardwareComponent):
                                                        si = False, ro = 0,
                                                        spinbox_decimals = 4, spinbox_step=0.001,
                                                        initial = 0., vmin= 0., unit='s')
-        
+        self.steps = self.add_logged_quantity('steps', dtype = int,
+                                                       si = False, ro = 0, 
+                                                       initial = 3, vmin= 1)
         self.add_operation("start_task", self.start)
         self.add_operation("stop_task", self.stop)
         
     def connect(self):
 
-        self.AO_device = NI_AO_device(self.channel.val, verbose = True)
+        self.AO_device = NI_AO_device(self.channel.val, verbose = False)
         self.AO_device.create_task()
         self.mode.hardware_set_func = self.AO_device.reset_task_on_mode_change
         self.channel.hardware_set_func = self.AO_device.reset_task_on_channel_change
@@ -83,15 +85,17 @@ class NI_AO_hw(HardwareComponent):
                                        self.trigger_source.val, 
                                        self.trigger_edge.val)
             
-            self.AO_device.write_waveform(self.sample_mode.val,
-                                            self.waveform.val,  
+            self.AO_device.generate_waveform(  self.waveform.val,  
                                             self.num_periods.val,
                                             self.amplitude.val, 
                                             self.frequency.val,
                                             self.spike_amplitude.val,
                                             self.spike_duration.val,
                                             self.samples_per_period.val,
+                                            self.steps.val,
                                             self.offset.val ) 
+            self.AO_device.write_waveform(self.sample_mode.val)
+        
         elif self.mode.val == 'ao_voltage':
             self.AO_device.write_constant_voltage(self.amplitude.val)
         else: 

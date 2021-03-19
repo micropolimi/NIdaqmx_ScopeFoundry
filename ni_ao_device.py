@@ -64,30 +64,21 @@ class NI_AO_device(object):
         self.task.write(voltage, auto_start = True)
         if self.verbose: print(f'voltage set to {voltage}' )
        
-    def write_waveform( self, sample_mode_key = 'continuous',
-                        waveform_type = 'sine',
-                        num_periods = 6, 
-                        amplitude = 1,        
-                        frequency = 50,
-                        spike_amplitude = 0, spike_duration = 0, 
-                        samples_per_period = 100,
-                        offset = 0 ):
-        
+    def write_waveform( self, sample_mode_key = 'continuous'):
+        '''Write the samples on the DAQ AO board without starting the generation 
+        '''
         if not hasattr(self, 'task'):
             raise(AttributeError('AO task not active, unable to write signal'))  
-  
-        rate= frequency * samples_per_period 
-        if rate >= 250000:
-            raise(ValueError('Frequency too high, unable to set NIDAQ analog output'))
-        
+            
+        if not hasattr(self, 'samples'):
+            raise(AttributeError('Samples not generated, unable to write signal'))      
+            
         sample_mode = self.sample_modes[sample_mode_key]
             
-        samples = self.generate_signal(waveform_type,
-                                        amplitude, frequency, rate, num_periods,
-                                        spike_amplitude, spike_duration, 
-                                        offset)
-        self.samples = samples
+        samples = self.samples
         num_samples = len(samples) # self.num_periods * int(self.rate/self.frequency)
+        rate = self.rate
+        
         try:
             self.stop_task()
             self.task.timing.cfg_samp_clk_timing(rate = rate, 
@@ -100,18 +91,27 @@ class NI_AO_device(object):
         except Exception as err: 
             print (err)
         
-    def generate_signal(self, waveform_type,
-                        amplitude, frequency, rate, num_periods,
-                        spike_amplitude, spike_duration, 
-                        offset):
-        
-        T = 1/frequency # Hz 
-        rate = rate
+    def generate_waveform(self, waveform_type = 'sine',
+                            num_periods = 6, 
+                            amplitude = 1,        
+                            frequency = 50,
+                            spike_amplitude = 0., spike_duration = 0., 
+                            samples_per_period = 100,
+                            steps = 3,
+                            offset = 0):
+        '''For waveform_type == step a function with steps of the specified amplitude in generated
+        Is spike_amplitude > 0 a voltage spike is generated at the beginning of each period 
+        '''
+        rate = frequency * samples_per_period 
+        if rate >= 250000:
+            raise(ValueError('Frequency too high, unable to set NIDAQ analog output'))
+         
+        self.rate = rate
         dt = 1/rate
+        T = 1/frequency # Hz
         
-        Ncycles = num_periods
         epsilon = 1e-9 # 1ns delay to avoid approximation error in rect and step function
-        t = np.arange(0, Ncycles*T, dt) + epsilon
+        t = np.arange(0, num_periods*T, dt) + epsilon
 
         if waveform_type == "sine":
             samples = amplitude * np.sin(2*np.pi*t/T)
@@ -121,7 +121,7 @@ class NI_AO_device(object):
             samples =  amplitude * ( (t) % T < (width*T) ).astype('float')
         
         elif waveform_type == "step": 
-            Nsteps = 3 # number of steps is set to 3 here
+            Nsteps = steps # number of steps is set to 3 here
             deltaAmp = amplitude # the voltage increase in each step is deltaAmp
             samples =  deltaAmp * ( (t//T) % Nsteps ).astype('float')
         else:
@@ -133,7 +133,7 @@ class NI_AO_device(object):
             samples += spike_amplitude * ( (t%T) < spike_duration)
         
         samples += offset
-        return samples
+        self.samples = samples
               
     def start_task(self):
         
@@ -163,22 +163,23 @@ if __name__ == '__main__':
     import time  
     from matplotlib import pyplot as plt
        
-    dev = NI_AO_device('Dev1/ao0')
+    dev = NI_AO_device('Dev2/ao0')
     
     try:
         dev.create_task()
-        dev.set_trigger(False, '/Dev1/PFI0','rising')
+        dev.set_trigger(False, '/Dev2/PFI0','rising')
         
-        dev.write_waveform( 
-                         sample_mode_key = 'finite',
-                         waveform_type = 'sine',
-                         num_periods = 3, 
+        dev.generate_waveform(waveform_type = 'step',
+                         num_periods = 6, 
                          amplitude = 1.,        
                          frequency = 100,
-                         spike_amplitude = 0., spike_duration = 0., 
+                         spike_amplitude = 1., spike_duration = 0.0005, 
                          samples_per_period = 100,
+                         steps = 3,
                          offset = 0.)
         
+        dev.write_waveform(sample_mode_key = 'finite') 
+                         
         if hasattr(dev, 'samples'):
             dev.start_task()
             time.sleep(1.1)
