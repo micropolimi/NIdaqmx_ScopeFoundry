@@ -25,15 +25,22 @@ class NI_AO_hw(HardwareComponent):
         self.num_periods = self.add_logged_quantity('num_periods', dtype = int ,
                                                     si = False, ro = 0,
                                                     vmin=1, initial = 3)
-        self.amplitude = self.add_logged_quantity('amplitudes', dtype = float,
+        self.amplitude0 = self.add_logged_quantity('amplitude0', dtype = float,
                                                   si = False, ro = 0, initial = 1.,
                                                   vmin=-10, vmax=10, unit='V')
+        self.amplitude1 = self.add_logged_quantity('amplitude1', dtype = float,
+                                                  si = False, ro = 0, initial = 0.,
+                                                  vmin=-10, vmax=10, unit='V')
+        self.steps = self.add_logged_quantity('steps', dtype = int,
+                                                       si = False, ro = 0, 
+                                                       initial = 3, vmin= 1)
+        
         self.waveform = self.add_logged_quantity('waveform', dtype=str,
-                                                 choices=[ "sine", "rect","step"],
-                                                 initial='sine')
+                                                 choices=["rect", "step", "custom"],
+                                                 initial='rect')
         self.frequency = self.add_logged_quantity('frequency', dtype = float,
                                                   si = False, ro = 0,
-                                                  initial = 100, unit='Hz')
+                                                  initial = 200, unit='Hz')
         self.offset = self.add_logged_quantity('offset', dtype = float,
                                                si = False, ro = 0,
                                                initial = 0, unit='V')
@@ -52,15 +59,14 @@ class NI_AO_hw(HardwareComponent):
                                                        si = False, ro = 0,
                                                        spinbox_decimals = 4, spinbox_step=0.001,
                                                        initial = 0., vmin= 0., unit='s')
-        self.steps = self.add_logged_quantity('steps', dtype = int,
-                                                       si = False, ro = 0, 
-                                                       initial = 3, vmin= 1)
+        
+        
         self.add_operation("start_task", self.start)
         self.add_operation("stop_task", self.stop)
         
     def connect(self):
 
-        self.AO_device = NI_AO_device(self.channel.val, verbose = False)
+        self.AO_device = NI_AO_device(self.channel.val, verbose = True)
         self.AO_device.create_task()
         self.mode.hardware_set_func = self.AO_device.reset_task_on_mode_change
         self.channel.hardware_set_func = self.AO_device.reset_task_on_channel_change
@@ -84,10 +90,9 @@ class NI_AO_hw(HardwareComponent):
             self.AO_device.set_trigger(self.trigger.val, 
                                        self.trigger_source.val, 
                                        self.trigger_edge.val)
-            
             self.AO_device.generate_waveform(  self.waveform.val,  
                                             self.num_periods.val,
-                                            self.amplitude.val, 
+                                            [self.amplitude0.val, self.amplitude1.val], 
                                             self.frequency.val,
                                             self.spike_amplitude.val,
                                             self.spike_duration.val,
@@ -95,9 +100,8 @@ class NI_AO_hw(HardwareComponent):
                                             self.steps.val,
                                             self.offset.val ) 
             self.AO_device.write_waveform(self.sample_mode.val)
-        
         elif self.mode.val == 'ao_voltage':
-            self.AO_device.write_constant_voltage(self.amplitude.val)
+            self.AO_device.write_constant_voltage(self.amplitude0.val)
         else: 
             raise(AttributeError('Waveform not specified'))
         

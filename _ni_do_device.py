@@ -3,7 +3,7 @@ import numpy as np
 
 from nidaqmx import stream_writers
 
-class NI_AO_device(object):
+class NI_DO_device(object):
     
     def __init__(self, channel, debug = False, dummy = False, verbose = True):
         
@@ -29,8 +29,10 @@ class NI_AO_device(object):
             self.close()
             
         self.task = nidaqmx.Task()
-        self.task.ao_channels.add_ao_voltage_chan(physical_channel=self.channel,
-                                                  min_val=-10.0, max_val=10.0) 
+        # self.task.ao_channels.add_ao_voltage_chan(physical_channel=self.channel,
+        #                                          min_val=-10.0, max_val=10.0) 
+        self.task.do_channels.add_do_chan(lines=self.channel)
+        
     
     def set_trigger(self, trigger = False, trigger_source = "/Dev1/PFI0", trigger_edge_key = 'rising'):
         
@@ -51,30 +53,32 @@ class NI_AO_device(object):
     def reset_task_on_mode_change(self, mode):
         self.close()
         self.create_task()
-        if self.verbose: print(f'AO task recreated, now operating in {mode} mode')
+        if self.verbose: print(f'DO task recreated, now operating in {mode} mode')
         
     def reset_task_on_channel_change(self, channel):
         self.close()
         self.channel = channel
         self.create_task()
-        if self.verbose: print(f'AO task recreated, now operating in channel {channel}')
+        if self.verbose: print(f'DO task recreated, now operating in line {channel}')
         
-    def write_constant_voltage(self, voltage): 
+    def write_single_value(self, val): 
         self.stop_task()
-        self.task.write(voltage, auto_start = True)
-        if self.verbose: print(f'voltage set to {voltage}' )
+        self.task.write(bool(val), auto_start = True)
+        if self.verbose: print(f'DO port set to {bool(val)}' )
        
-    def write_waveform( self, sample_mode_key = 'continuous'):
-        '''Write the samples on the DAQ AO board without starting the generation 
-        '''
+    def write_waveform( self, 
+                        source = '/Dev1/ao/SampleClock',
+                        sample_mode_key = 'continuous'):
+                       
+        
         if not hasattr(self, 'task'):
-            raise(AttributeError('AO task not active, unable to write signal'))  
+            raise(AttributeError('DO task not active, unable to write'))
             
         if not hasattr(self, 'samples'):
-            raise(AttributeError('Samples not generated, unable to write signal'))      
-            
+            raise(AttributeError('Samples not generated, unable to write'))      
+  
         sample_mode = self.sample_modes[sample_mode_key]
-            
+        
         samples = self.samples
         num_samples = len(samples) # self.num_periods * int(self.rate/self.frequency)
         rate = self.rate
@@ -82,57 +86,46 @@ class NI_AO_device(object):
         try:
             self.stop_task()
             self.task.timing.cfg_samp_clk_timing(rate = rate, 
+                                                 source = source,
                                                  sample_mode = sample_mode, 
                                                  samps_per_chan = num_samples)
-            writer = stream_writers.AnalogSingleChannelWriter(self.task.out_stream, auto_start = False)
-            written_num = writer.write_many_sample(samples)
+            writer = stream_writers.DigitalSingleChannelWriter(self.task.out_stream, auto_start = False)
+            written_num = writer.write_many_sample_port_byte(samples.astype('uint8'))
             if self.verbose: print(f'successfully written {written_num} samples' )
             
         except Exception as err: 
             print (err)
         
-    def generate_waveform(self, waveform_type = 'sine',
-                            num_periods = 6, 
-                            amplitude = 1,        
-                            frequency = 50,
-                            spike_amplitude = 0., spike_duration = 0., 
-                            samples_per_period = 100,
-                            steps = 3,
-                            offset = 0):
-        '''For waveform_type == step a function with steps of the specified amplitude in generated
-        Is spike_amplitude > 0 a voltage spike is generated at the beginning of each period 
-        '''
+    def generate_signal(self,  
+                        waveform_type = 'rect',
+                        frequency = 50,
+                        num_periods = 6,
+                        samples_per_period = 100,
+                        ):
+        
         rate = frequency * samples_per_period 
-        if rate >= 250000:
-            raise(ValueError('Frequency too high, unable to set NIDAQ analog output'))
-         
+        # if rate >= 250000:
+        #    raise(ValueError('Frequency too high, unable to set DO'))
         self.rate = rate
+        
+        T = 1/frequency # Hz 
         dt = 1/rate
-        T = 1/frequency # Hz
         
+        Ncycles = num_periods
         epsilon = 1e-9 # 1ns delay to avoid approximation error in rect and step function
-        t = np.arange(0, num_periods*T, dt) + epsilon
+        t = np.arange(0, Ncycles*T, dt) + epsilon
 
-        if waveform_type == "sine":
-            samples = amplitude * np.sin(2*np.pi*t/T)
-        
-        elif waveform_type == "rect": 
+        if waveform_type == "rect": 
             width = 0.5
-            samples =  amplitude * ( (t) % T < (width*T) ).astype('float')
+            samples =  ( (t) % T < (width*T) ).astype('bool')
         
         elif waveform_type == "step": 
-            Nsteps = steps # number of steps is set to 3 here
-            deltaAmp = amplitude # the voltage increase in each step is deltaAmp
-            samples =  deltaAmp * ( (t//T) % Nsteps ).astype('float')
+            Nsteps = 3 # number of steps is set to 3 here
+            #deltaAmp = amplitude # the voltage increase in each step is deltaAmp
+            samples =   ( (t//T) % Nsteps ).astype('bool')
         else:
             raise(ValueError('Waveform not specified'))
             
-        if spike_amplitude > 0:
-            # spikeT = 0.0005 #s
-            # spikeT = 0.05/freq # percentage of the step duration
-            samples += spike_amplitude * ( (t%T) < spike_duration)
-        
-        samples += offset
         self.samples = samples
               
     def start_task(self):
@@ -155,6 +148,8 @@ class NI_AO_device(object):
         if not hasattr(self, 'task'):
             raise(AttributeError('Task not active, unable to close'))
         self.task.close()
+        
+        
         delattr(self, 'task')
         
 
@@ -163,29 +158,26 @@ if __name__ == '__main__':
     import time  
     from matplotlib import pyplot as plt
        
-    dev = NI_AO_device('Dev2/ao0')
+    dev = NI_DO_device('Dev2/port0/line0')
     
     try:
         dev.create_task()
-        dev.set_trigger(False, '/Dev2/PFI0','rising')
+        #dev.set_trigger(False, '/Dev1/PFI12','rising')
+        dev.generate_signal(waveform_type = 'rect',
+                            num_periods = 3, 
+                            frequency = 200,
+                            samples_per_period = 100)
         
-        dev.generate_waveform(waveform_type = 'step',
-                         num_periods = 6, 
-                         amplitude = 1.,        
-                         frequency = 100,
-                         spike_amplitude = 1., spike_duration = 0.0005, 
-                         samples_per_period = 100,
-                         steps = 3,
-                         offset = 0.)
+        dev.write_waveform(source = '/Dev1/ao/SampleClock', 
+                           sample_mode_key = 'continuous')
         
-        dev.write_waveform(sample_mode_key = 'finite') 
-                         
+        # dev.write_single_value(0.)
         if hasattr(dev, 'samples'):
-            dev.start_task()
-            time.sleep(1.1)
-            plt.figure() 
-            plt.plot(dev.samples)
-            
+             dev.start_task()
+             
+             plt.figure() 
+             plt.plot(dev.samples)
+        time.sleep(1.1)    
         dev.stop_task()
     finally:
         dev.close()

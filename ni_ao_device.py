@@ -38,7 +38,7 @@ class NI_AO_device(object):
         
         if not hasattr(self, 'task'):
             raise(AttributeError('AO task not active, unable to set trigger'))  
-        self.stop_task()
+        self.task.stop()
         if trigger:
             self.task.triggers.start_trigger.trig_type = nidaqmx.constants.TriggerType.DIGITAL_EDGE
             self.task.triggers.start_trigger.cfg_dig_edge_start_trig(trigger_source = trigger_source,
@@ -60,10 +60,15 @@ class NI_AO_device(object):
         if self.verbose: print(f'AO task recreated, now operating in channel {channel}')
         
     def write_constant_voltage(self, voltage): 
-        self.stop_task()
+        try:
+            self.task.stop()
+        except AttributeError as err:
+            if self.verbose:  print('Task not active: ', err)
         self.task.write(voltage, auto_start = True)
-        if self.verbose: print(f'voltage set to {voltage}' )
+        if self.verbose: print(f'AO voltage set to {voltage}' )
        
+    
+    
     def write_waveform( self, sample_mode_key = 'continuous'):
         '''Write the samples on the DAQ AO board without starting the generation 
         '''
@@ -80,7 +85,7 @@ class NI_AO_device(object):
         rate = self.rate
         
         try:
-            self.stop_task()
+            self.task.stop()
             self.task.timing.cfg_samp_clk_timing(rate = rate, 
                                                  sample_mode = sample_mode, 
                                                  samps_per_chan = num_samples)
@@ -93,13 +98,13 @@ class NI_AO_device(object):
         
     def generate_waveform(self, waveform_type = 'sine',
                             num_periods = 6, 
-                            amplitude = 1,        
+                            amplitude_list = [1.,0.],        
                             frequency = 50,
                             spike_amplitude = 0., spike_duration = 0., 
                             samples_per_period = 100,
                             steps = 3,
                             offset = 0):
-        '''For waveform_type == step a function with steps of the specified amplitude in generated
+        '''For waveform_type == step a function with steps of the specified amplitude[0] is generated
         Is spike_amplitude > 0 a voltage spike is generated at the beginning of each period 
         '''
         rate = frequency * samples_per_period 
@@ -110,8 +115,12 @@ class NI_AO_device(object):
         dt = 1/rate
         T = 1/frequency # Hz
         
+        amplitude = amplitude_list[0]
+        amplitude1 = amplitude_list[1]
+        
+        Ncycles = num_periods
         epsilon = 1e-9 # 1ns delay to avoid approximation error in rect and step function
-        t = np.arange(0, num_periods*T, dt) + epsilon
+        t = np.arange(0, Ncycles*T, dt) + epsilon
 
         if waveform_type == "sine":
             samples = amplitude * np.sin(2*np.pi*t/T)
@@ -124,6 +133,14 @@ class NI_AO_device(object):
             Nsteps = steps # number of steps is set to 3 here
             deltaAmp = amplitude # the voltage increase in each step is deltaAmp
             samples =  deltaAmp * ( (t//T) % Nsteps ).astype('float')
+        
+        elif waveform_type == "custom": 
+            Nsteps = steps # number of steps is set to 3 here
+            deltaAmp0 = amplitude # the voltage increase in each step is deltaAmp
+            deltaAmp1 = amplitude1         
+            cycle = ((t // T) % Nsteps).astype('int')
+            samples = deltaAmp0*(cycle>0) + deltaAmp1*(cycle>1)
+        
         else:
             raise(ValueError('Waveform not specified'))
             
@@ -144,20 +161,22 @@ class NI_AO_device(object):
             self.task.start()
         
     def stop_task(self):
-        if not hasattr(self, 'task'):
-            raise(AttributeError('Task not active, unable to stop'))
-        # suppress warning that might occurr when task i stopped during acquisition
-        # warnings.filterwarnings('ignore', category=nidaqmx.DaqWarning)
-        self.task.stop() #stop the task(different from the closing of the task, I suppose)
-        # warnings.filterwarnings('default',category=nidaqmx.DaqWarning)      
+        try:
+            self.task.stop()
+            self.create_task()
+            self.write_constant_voltage(0.0)
+        except AttributeError as err:
+            if self.verbose:  print('Task not active: ', err)
             
     def close(self):
-        if not hasattr(self, 'task'):
-            raise(AttributeError('Task not active, unable to close'))
-        self.task.close()
-        delattr(self, 'task')
+        try:
+            self.task.stop()
+            self.task.close()
+            delattr(self, 'task')
+        except AttributeError as err:
+            if self.verbose:  print('Task not active: ', err) 
         
-
+        
 if __name__ == '__main__':
     
     import time  
@@ -169,11 +188,11 @@ if __name__ == '__main__':
         dev.create_task()
         dev.set_trigger(False, '/Dev2/PFI0','rising')
         
-        dev.generate_waveform(waveform_type = 'step',
+        dev.generate_waveform(waveform_type = 'custom',
                          num_periods = 6, 
-                         amplitude = 1.,        
+                         amplitude_list = [1.,0.5],        
                          frequency = 100,
-                         spike_amplitude = 1., spike_duration = 0.0005, 
+                         spike_amplitude = 0.1, spike_duration = 0.0005, 
                          samples_per_period = 100,
                          steps = 3,
                          offset = 0.)
@@ -187,7 +206,8 @@ if __name__ == '__main__':
             plt.plot(dev.samples)
             
         dev.stop_task()
+        
+        
     finally:
         dev.close()
-       
         
